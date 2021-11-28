@@ -12,6 +12,7 @@ fn main() {
         Complex::new(0.0, 0.0),
         Complex::new(0.0, 0.0),
         Complex::new(0.0, 0.0),
+ 
     ];
     let mut fft = fft::FFTransformer::new();
     let transformed_x = fft.fft(&v, fft::Direction::FORWARD);
