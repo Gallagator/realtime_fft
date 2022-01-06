@@ -5,7 +5,7 @@ use std::f64::consts::PI;
 
 /// A struct which can perform FFTs on buffers.
 pub struct FFTransformer {
-    buffer : Vec<Complex<f64>>,
+    buffer: Vec<Complex<f64>>,
 }
 
 /// Enum to specify which direction an FFT should take.
@@ -15,7 +15,6 @@ pub enum Direction {
 }
 
 impl FFTransformer {
-
     /// Creates a new FFTransformer.
     pub fn new() -> Self {
         FFTransformer { buffer: Vec::new() }
@@ -35,20 +34,20 @@ impl FFTransformer {
         debug_assert!(xs.len() == transformed_xs.len() && xs.len().is_power_of_two());
         // Closure to index even and odd sub-arrays properly.
         let index = |i: usize| start + step * i;
-    
+
         // Base case: FFT for buffer of size 2
         if n == 2 {
             transformed_xs[index(0)] = xs[index(0)] + xs[index(1)];
             transformed_xs[index(1)] = xs[index(0)] - xs[index(1)];
             return;
         }
-    
+
         // Angle of complex sinusoid doubles in the recursive case.
         let next_exp = exp * exp;
         // Perform FFT on even and odd sub-arrays.
         self.basic_fft(xs, transformed_xs, next_exp, start, step * 2, n / 2);
         self.basic_fft(xs, transformed_xs, next_exp, start + step, step * 2, n / 2);
-    
+
         // X[k] = Xe[k] + e^(j*omega*k) Xo[k]           for 0 <= k < n / 2
         // X[k] = Xe[k] - e^(j*omega*k) Xo[k]           for 0 <= k < n / 2
         let mut current_exp = Complex::<f64>::new(1.0, 0.0);
@@ -66,8 +65,8 @@ impl FFTransformer {
             } else {
                 transformed_xs[index(2 * i + 1)] * current_exp
             };
-            
-            /* Save transformed value that is about to be overwritten. 
+
+            /* Save transformed value that is about to be overwritten.
              * note: (i + n / 2) % (n / 4) == i % (n / 4) */
             self.buffer[i % (n / 4)] = transformed_xs[index(i + n / 2)];
 
@@ -76,7 +75,7 @@ impl FFTransformer {
             current_exp = current_exp * exp;
         }
     }
-    
+
     /// Performs an fft on a buffer 'xs' in the direction specified by 'dir'
     /// Returns a new vector containing the transformed buffer.
     pub fn fft(&mut self, xs: &Vec<Complex<f64>>, dir: Direction) -> Vec<Complex<f64>> {
@@ -89,17 +88,18 @@ impl FFTransformer {
         }
 
         /* rads per sample */
-        let angle =  2.0 * PI / (len as f64) * match dir {
-            Direction::FORWARD   => -1.0,
-            Direction::BACKWARD  =>  1.0,
-        };
+        let angle = 2.0 * PI / (len as f64)
+            * match dir {
+                Direction::FORWARD => -1.0,
+                Direction::BACKWARD => 1.0,
+            };
         let mut transformed_xs = vec![Complex::<f64>::new(0.0, 0.0); len];
         let exp = Complex::<f64>::from_polar(1.0, angle);
 
         self.basic_fft(xs, &mut transformed_xs, exp, 0, 1, len);
         transformed_xs
     }
-   
+
     /// Divide buffer by it's length. Needed after an inverse fft.
     pub fn normalise(xs: &mut Vec<Complex<f64>>) {
         let len = xs.len();
@@ -107,23 +107,32 @@ impl FFTransformer {
             xs[i] /= len as f64;
         }
     }
+
+    pub fn hann_window(xs: &mut Vec<Complex<f64>>) {
+        let len = xs.len();
+        for i in 0..len {
+            let sin_term = (PI * (i as f64) / (len as f64)).sin();
+            let coef = sin_term * sin_term;
+            xs[i] *= coef;
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rand::prelude::*;
     use approx::*;
+    use rand::prelude::*;
 
     fn gen_rand_buffer(len: usize) -> Vec<Complex<f64>> {
         assert!(len.is_power_of_two());
         let mut xs = Vec::with_capacity(len);
         for _ in 0..len {
-            xs.push(Complex::new(random(), random()));   
+            xs.push(Complex::new(random(), random()));
         }
         xs
     }
-    
+
     fn fft_is_injective(len: usize) {
         let xs = gen_rand_buffer(len);
         let mut transformer = FFTransformer::new();
@@ -132,18 +141,26 @@ mod tests {
         FFTransformer::normalise(&mut xs_reverted);
         for i in 0..xs.len() {
             /* Ensure values are within 0.1% of eachother. */
-            assert_relative_eq!(xs[i].re, xs_reverted[i].re, max_relative = 0.001, epsilon = f64::EPSILON);
-            assert_relative_eq!(xs[i].im, xs_reverted[i].im, max_relative = 0.001, epsilon = f64::EPSILON);
+            assert_relative_eq!(
+                xs[i].re,
+                xs_reverted[i].re,
+                max_relative = 0.001,
+                epsilon = f64::EPSILON
+            );
+            assert_relative_eq!(
+                xs[i].im,
+                xs_reverted[i].im,
+                max_relative = 0.001,
+                epsilon = f64::EPSILON
+            );
         }
     }
 
     #[test]
     fn fft_is_injective_many() {
         for _ in 0..100 {
-            let n : u8 = random::<u8>() % 15;
+            let n: u8 = random::<u8>() % 15;
             fft_is_injective(2 << n);
         }
     }
-
 }
-

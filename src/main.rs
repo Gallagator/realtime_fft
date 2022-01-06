@@ -1,20 +1,8 @@
-mod fft;
-
-use num_complex::*;
+mod application;
+mod audio_input;
+mod sliding_dft;
 
 fn main() {
-    let v = vec![
-        Complex::new(1.0, 0.0),
-        Complex::new(0.0, 0.0),
-        Complex::new(0.0, 0.0),
-        Complex::new(0.0, 0.0),
-        Complex::new(0.0, 0.0),
-        Complex::new(0.0, 0.0),
-        Complex::new(0.0, 0.0),
-        Complex::new(0.0, 0.0),
- 
-    ];
-    let mut fft = fft::FFTransformer::new();
-    let transformed_x = fft.fft(&v, fft::Direction::FORWARD);
-    println!("{:#?}", transformed_x);
+    application::Application::new();
+    //   audio_input::audio_init();
 }
