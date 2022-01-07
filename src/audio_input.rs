@@ -1,30 +1,28 @@
-use crate::sliding_dft::SlidingDftSrc;
+use crate::sliding_dft::{SlidingDftSrc, reallocate_ring_buf};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
-use ringbuf::Producer;
+use ringbuf::{Consumer, Producer, RingBuffer};
 use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
 struct BufferInfo {
-    buf: Vec<f32>,
-    time_of_fill: std::time::Instant,
-    just_filled: bool,
+    sample_prod: Producer<f32>,
+    time_of_fill: Option<Instant>,
+}
+
+struct InputStreamInner {
+    stream: cpal::Stream,
+    buffer_info: Arc<Mutex<BufferInfo>>,
+    sample_cons: Arc<Mutex<Consumer<f32>>>,
 }
 
 pub struct InputStream {
-    stream: cpal::Stream,
+    inner: Option<InputStreamInner>,
     sample_rate: cpal::SampleRate,
-    max_buffer_size: cpal::FrameCount,
-    buffer_info: Arc<Mutex<BufferInfo>>,
 }
 
 impl InputStream {
     pub fn new() -> InputStream {
-        let buffer_info = Arc::new(Mutex::new(BufferInfo {
-            buf: Vec::new(),
-            time_of_fill: std::time::Instant::now(),
-            just_filled: false,
-        }));
-
-        // Find input device and input configs.
+         // Find input device and input configs.
         let host = cpal::default_host();
         let input_device = host.default_input_device().expect("No input device found!");
         let mut input_configs = input_device
@@ -38,50 +36,81 @@ impl InputStream {
             .with_max_sample_rate();
 
         let sample_rate = supported_config.sample_rate();
-        println!("{:?}", supported_config);
+
+        InputStream {
+            inner: None,
+            sample_rate,
+        }
+    }
+}
+
+impl SlidingDftSrc for InputStream {
+    
+    fn init(&mut self, sample_buffer_size: usize) {
+        let (sample_prod, sample_cons) = RingBuffer::new(sample_buffer_size).split();
+           
+        let sample_cons = Arc::new(Mutex::new(sample_cons));
+        let buffer_info = Arc::new(Mutex::new(BufferInfo {
+            sample_prod: sample_prod,
+            time_of_fill: None,
+        }));
+
+         // Find input device and input configs.
+        let host = cpal::default_host();
+        let input_device = host.default_input_device().expect("No input device found!");
+        let mut input_configs = input_device
+            .supported_input_configs()
+            .expect("Error while querying configs!");
+
+        // Get supported config
+        let supported_config = input_configs
+            .next()
+            .expect("No supported config!")
+            .with_max_sample_rate();
+
+        let sample_rate = supported_config.sample_rate();
 
         // Share buffer info accross threads And initialise input stream.
         let buffer_info_clone = buffer_info.clone();
+        let sample_cons_clone = sample_cons.clone(); 
         let input_stream = input_device
             .build_input_stream(
                 &supported_config.into(),
                 // Closure copies recieved samples into a buffer.
                 move |data: &[f32], _: &cpal::InputCallbackInfo| {
+                    println!("BUFFER_FILL!");
                     let mut buf_info = buffer_info_clone.lock().unwrap();
-                    buf_info.time_of_fill = std::time::Instant::now();
+                    buf_info.time_of_fill = Some(std::time::Instant::now());
 
-                    if data.len() > buf_info.buf.len() {
-                        buf_info.buf.resize(data.len(), 0.0);
+                    if data.len() > buf_info.sample_prod.capacity() { 
+                        let mut old_cons = sample_cons_clone.lock().unwrap();
+                        let (new_prod, new_cons) = reallocate_ring_buf(&mut old_cons, data.len() + sample_buffer_size);
+                        *old_cons = new_cons;
+                        buf_info.sample_prod = new_prod;
                     }
-                    buf_info.buf[0..data.len()].copy_from_slice(data);
-                    buf_info.just_filled = true;
+                    buf_info.sample_prod.push_slice(data);
                 },
                 |err| eprintln!("An error occurred on the audio input stream!\n{}", err),
             )
             .unwrap();
 
         input_stream.play().unwrap();
-        InputStream {
+
+        self.inner = Some( InputStreamInner {
             stream: input_stream,
-            sample_rate: sample_rate,
-            max_buffer_size: 10000,
+            sample_cons: sample_cons,
             buffer_info: buffer_info,
-        }
+        });
     }
-}
 
-impl SlidingDftSrc for InputStream {
-    fn fill_buffer(
-        &mut self,
-        sample_buffer: &mut Producer<f32>,
-        fill_instant: &mut std::time::Instant,
-    ) {
-    }
     fn sample_rate(&self) -> u32 {
-        0
+        self.sample_rate.0
     }
 
-    fn max_buffer_size(&self) -> usize {
-        0
+    fn fill_instant(&self) -> Option<Instant> {
+        self.inner.as_ref().unwrap().buffer_info.lock().unwrap().time_of_fill
+    }
+    fn sample_cons(&self) -> &Arc<Mutex<Consumer<f32>>> {
+        &self.inner.as_ref().unwrap().sample_cons
     }
 }

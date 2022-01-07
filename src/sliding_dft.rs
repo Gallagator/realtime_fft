@@ -3,52 +3,38 @@ use ringbuf::{Consumer, Producer, RingBuffer};
 use std::cell::RefCell;
 use std::f32::consts::PI;
 use std::rc::Rc;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 pub trait SlidingDftSrc {
     /// Fills the sample buffer and records the time that it received the samples.
-    fn fill_buffer(
-        &mut self,
-        sample_buffer: &mut Producer<f32>,
-        fill_instant: &mut std::time::Instant,
-    );
-    /// Returns the sample rate of the dft source.
+    fn init( &mut self, sample_buffer_size: usize);
+    /// Returns the sample rate of the dft source. Must be made available before init.
     fn sample_rate(&self) -> u32;
-    /// Returns the maximum buffer size used by the source. Ideally, this value
-    /// will be kept small to reduce latency.
-    fn max_buffer_size(&self) -> usize;
+    /// Returns the instant that the sample buffer was most recently filled on.
+    /// only valid after call to init.
+    fn fill_instant(&self) -> Option<Instant>;
+    /// Returns the buffer consumer
+    /// only valid after call to init.
+    fn sample_cons(&self) -> &Arc<Mutex<Consumer<f32>>>;
 }
 
 pub struct SlidingDft<T: SlidingDftSrc> {
-    sample_prod: Producer<f32>,
-    sample_cons: Consumer<f32>,
-    newest_fill_instant: std::time::Instant,
-    latency: std::time::Duration,
-    halt_instant: Option<std::time::Instant>,
+    latency: Duration,
     sliding_dft: Rc<RefCell<Vec<Complex<f32>>>>,
     dft_src: T,
 }
 
 impl<T: SlidingDftSrc> SlidingDft<T> {
-    pub fn new(dft_src: T, window_size: std::time::Duration) -> SlidingDft<T> {
-        let max_buffer_size = dft_src.max_buffer_size();
+    pub fn new(mut dft_src: T, window_duration: Duration) -> SlidingDft<T> {
         let sample_rate = dft_src.sample_rate();
 
-        let window_size: usize = (sample_rate as f64 * window_size.as_secs_f64()) as usize;
-        // At this point,the max buffer size is unknown so the sample buffer will
-        // likely have to be reallocated. 
-        let sample_buffer_size = sample_buf_size(window_size, max_buffer_size);
-        let (mut sample_prod, sample_cons) = RingBuffer::new(sample_buffer_size).split();
+        let window_size: usize = (sample_rate as f64 * window_duration.as_secs_f64()) as usize;
 
-        for _ in 0..sample_buffer_size {
-            sample_prod.push(0.0).unwrap();
-        }
+        dft_src.init(window_size * 2);
 
         SlidingDft {
-            sample_prod: sample_prod,
-            sample_cons: sample_cons,
-            newest_fill_instant: std::time::Instant::now(),
-            latency: std::time::Duration::ZERO,
-            halt_instant: None,
+            latency: window_duration,
             sliding_dft: Rc::new(RefCell::new(vec![
                 Complex::<f32>::new(0.0, 0.0);
                 window_size
@@ -57,58 +43,59 @@ impl<T: SlidingDftSrc> SlidingDft<T> {
         }
     }
 
-    /// Updates the value for the dtf. Should be called in a fairly tight loop.
+    /// Updates the value for the SDFT. Should be called in a fairly tight loop.
     /// Perhaps even in its own thread.
     pub fn update(&mut self) {
-        let sliding_dft = &self.sliding_dft;
+        let sliding_dft = self.sliding_dft.borrow();
+        
+        let sample_rate = self.dft_src.sample_rate();
+        let newest_fill_instant = self.dft_src.fill_instant();
+        let window_size = sliding_dft.len();
 
-        let window_size = sliding_dft.borrow().len();
-
-        let sample_buf_size = sample_buf_size(window_size, self.dft_src.max_buffer_size());
-        if self.sample_cons.capacity() <  sample_buf_size{
-            let (prod, cons) = reallocate_ring_buf(&mut self.sample_cons, sample_buf_size);
-            self.sample_prod = prod;
-            self.sample_cons = cons; 
-        }
-
-        self.dft_src
-            .fill_buffer(&mut self.sample_prod, &mut self.newest_fill_instant);
         /* Window start time. */
-        let window_start = std::time::Instant::now() - self.latency;
-        debug_assert!(window_start < self.newest_fill_instant);
+        let window_start = Instant::now() - self.latency;
 
-        // Window start in samples relative the the newest fill instant
-        let window_start = ((self.newest_fill_instant - window_start).as_secs_f64()
-            * self.dft_src.sample_rate() as f64) as usize;
-        // Window start index. Also the number of samples the window has moved by
-        let window_start = window_size - window_start;
-        debug_assert!(window_start > 0);
-        debug_assert!(window_start < sliding_dft.borrow().len());
-
-        // Not enough samples to perform SDFT on. Latency must be increased and
-        // SDFT cannot be calculated. Code assumes update is called in a tight
-        // loop. This is a rather primitive attemt to minimise latency.
-        if window_start + sliding_dft.borrow().len() < self.sample_cons.len()
-            && self.halt_instant == None
-        {
-            self.halt_instant = Some(std::time::Instant::now());
+        // Buffer hasn't yet been filled, SDFT impossible return.
+        if newest_fill_instant == None {
             return;
-        } else if let Some(instant) = self.halt_instant {
-            self.latency += std::time::Instant::now() - instant;
+        }
+        let newest_fill_instant = newest_fill_instant.unwrap();
+                
+        // Not enough samples to perform SDFT on. Latency must be increased and
+        // SDFT cannot be calculated. 
+        let window_len_secs = Duration::from_secs_f64(sliding_dft.len() as f64 / sample_rate as f64);
+        if newest_fill_instant < window_start + window_len_secs {
+            self.latency += window_start + window_len_secs - newest_fill_instant;
             return;
         }
 
+        let sample_cons_lock = self.dft_src.sample_cons();
+        let mut sample_cons = sample_cons_lock.lock().unwrap();
+
+        // Time difference in samples between window sample and newest sample
+        let window_start = ((newest_fill_instant - window_start).as_secs_f64() * sample_rate as f64) as usize;
+        // Not enough samples in the buffer!
+        if window_start > sample_cons.len() {
+            return;
+        }
+        // This is calculated shitily
+        let window_start = sample_cons.len() - window_start; 
+
+        println!("window_start: {}, dft_len: {}, latency: {:?}, sample_cons len: {}", window_start, sliding_dft.len(), self.latency, sample_cons.len());
+        debug_assert!(window_start > 0);
+        debug_assert!(window_start < sliding_dft.len()); // TODO drop windows if this doesnt hold.
+        debug_assert!(window_start + sliding_dft.len() < sample_cons.len());
+    
         // Performs sliding dft.
-        let dft_clone = sliding_dft.clone();
-        self.sample_cons.access_mut(|buf1, buf2| {
+        let mut dft_clone = sliding_dft.clone();
+        sample_cons.access(|buf1, buf2| {
             let full_buf = [buf1, buf2].concat();
             let old = &full_buf[0..window_start];
             let new = &full_buf[window_size..(window_size + window_start)];
 
             debug_assert!(old.len() == new.len());
-
+            
             let omega = 2.0 * PI / (window_size as f32);
-            let mut dft_clone = dft_clone.borrow_mut();
 
             for k in 0..dft_clone.len() {
                 for n in 0..old.len() {
@@ -121,7 +108,7 @@ impl<T: SlidingDftSrc> SlidingDft<T> {
         });
 
         // Samples are old and not needed anymore.
-        self.sample_cons.discard(window_start);
+        sample_cons.discard(window_start);
     }
 
     /// Returns the dft of the singal.
@@ -130,15 +117,9 @@ impl<T: SlidingDftSrc> SlidingDft<T> {
     }
 }
 
-fn reallocate_ring_buf<T>(consumer: &mut Consumer<T>, size: usize) -> (Producer<T>, Consumer<T>) {
+pub fn reallocate_ring_buf<T>(consumer: &mut Consumer<T>, size: usize) -> (Producer<T>, Consumer<T>) {
     let (mut prod, cons) = RingBuffer::new(size).split();
     prod.move_from(consumer, None);
     (prod, cons)
 }
 
-// window_size * 2 assumes the SDFT will be called frequently enough that the 
-// window will be consumed quickly enough. And of course, the maximum buffer must
-// be able to fit inside the sample buffer.
-fn sample_buf_size(window_size: usize, max_buf_size: usize) -> usize {
-    window_size * 2 + max_buf_size
-}
