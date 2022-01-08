@@ -8,6 +8,8 @@ edition = "2018"
 [dependencies]
 num-complex = "0.4.0"
 ringbuf = "0.2.6"
+realfft = "2.0.1"
+rustfft = "6.0.1"
 # Crates used for testing fft.
 rand = "0.8.4"
 approx = "0.5.0"
