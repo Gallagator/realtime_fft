@@ -50,44 +50,37 @@ impl<T: SlidingDftSrc> SlidingDft<T> {
     /// Updates the value for the SDFT. Should be called in a fairly tight loop.
     /// Perhaps even in its own thread.
     pub fn update(&mut self) {
+        let window_size = (self.sliding_dft.borrow().len() - 1) * 2;
         let latency_info_ref = self.dft_src.latency_info();
-        let latency_info = latency_info_ref.lock().unwrap();
-        // Latency unknown. return
-        if latency_info.max_latency == None {
-            return;
-        }
-        // Unwrap latency data.
-        let src_latency = latency_info.max_latency.unwrap();
-        let sliding_dft = self.sliding_dft.borrow();
 
-        // Spectrum is about half the window size because the input data is real.
-        let window_size = (sliding_dft.len() - 1) * 2;
+        // If Latency and sample at instant are present, calculate starting 
+        // sample for dft. Otherwise return.
+        let window_start_sample = match latency_info_ref.get_mut().unwrap() {
+            LatencyInfo {
+                sample_at_instant: Some((sample_at, sample_instant)),
+                max_latency: Some(src_latency)
+            } => {
+                // Spectrum is about half the window size because the input data is real.
 
-        // Sample at an instant hasn't been taken by callback.
-        if latency_info.sample_at_instant == None {
-            return;
-        }
-        let mut sample_at_instant = latency_info.sample_at_instant.unwrap();
+                let window_end_instant = Instant::now() - *src_latency;
+                let window_start_instant = window_end_instant - self.latency();
 
-        let window_end_instant = Instant::now() - src_latency;
-        let window_start_instant = window_end_instant - self.latency();
+                // Latency is longer than expected.)uu Return and try again later.
+                if window_end_instant > *sample_instant {
+                    return;
+                }
 
+                // Start sample is the number of samples behind the sample at sample_instant.
+                let window_start_sample = *sample_at
+                    - ((*sample_instant - window_start_instant) * self.dft_src.sample_rate()).as_secs()
+                        as usize;
 
-        // Latency is longer than expected. Return and try again later.
-        if window_end_instant > sample_at_instant.1 {
-            return;
-        }
-
-        // Start sample is the number of samples behind the sample at sample_instant.
-        let window_start_sample = sample_at_instant.0
-            - ((sample_at_instant.1 - window_start_instant) * self.dft_src.sample_rate()).as_secs()
-                as usize;
-
-        println!("sample_at_instant {:?}", sample_at_instant.0);
-
-        sample_at_instant.0 -= window_start_sample;
-
-        // Acquire consumer lock.
+                *sample_at -= window_start_sample;
+                window_start_sample
+            },
+            _ => return,
+        };
+                // Acquire consumer lock.
         let sample_cons_lock = self.dft_src.sample_cons();
         let mut sample_cons = sample_cons_lock.lock().unwrap();
 
@@ -98,7 +91,7 @@ impl<T: SlidingDftSrc> SlidingDft<T> {
         assert!(window_size < sample_cons.len());
 
         // Performs dft.
-        let mut dft_clone = sliding_dft.clone();
+        let mut dft_clone = self.sliding_dft.borrow().clone();
         let fft_planner_clone = self.fft_planner.clone();
         sample_cons.access(|buf1, buf2| {
             let full_buf = [buf1, buf2].concat();
