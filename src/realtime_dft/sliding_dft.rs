@@ -2,6 +2,7 @@ use realfft::RealFftPlanner;
 use ringbuf::Consumer;
 use rustfft::num_complex::Complex;
 use std::cell::RefCell;
+use std::ops::DerefMut;
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -53,12 +54,12 @@ impl<T: SlidingDftSrc> SlidingDft<T> {
         let window_size = (self.sliding_dft.borrow().len() - 1) * 2;
         let latency_info_ref = self.dft_src.latency_info();
 
-        // If Latency and sample at instant are present, calculate starting 
+        // If Latency and sample at instant are present, calculate starting
         // sample for dft. Otherwise return.
-        let window_start_sample = match latency_info_ref.get_mut().unwrap() {
+        let window_start_sample = match latency_info_ref.lock().unwrap().deref_mut() {
             LatencyInfo {
                 sample_at_instant: Some((sample_at, sample_instant)),
-                max_latency: Some(src_latency)
+                max_latency: Some(src_latency),
             } => {
                 // Spectrum is about half the window size because the input data is real.
 
@@ -71,24 +72,46 @@ impl<T: SlidingDftSrc> SlidingDft<T> {
                 }
 
                 // Start sample is the number of samples behind the sample at sample_instant.
-                let window_start_sample = *sample_at
-                    - ((*sample_instant - window_start_instant) * self.dft_src.sample_rate()).as_secs()
-                        as usize;
+                let window_start_sample = (*sample_at).checked_sub(
+                    ((*sample_instant - window_start_instant) * self.dft_src.sample_rate())
+                        .as_secs() as usize).unwrap_or(0);
 
                 *sample_at -= window_start_sample;
                 window_start_sample
-            },
+            }
             _ => return,
         };
-                // Acquire consumer lock.
+
+        self.process_fft(window_size, window_start_sample);
+    }
+
+    /// Returns the dft of the singal.
+    pub fn dft(&self) -> &Rc<RefCell<Vec<Complex<f32>>>> {
+        &self.sliding_dft
+    }
+
+    pub fn sample_rate(&self) -> u32 {
+        self.dft_src.sample_rate()
+    }
+
+    fn process_fft(&mut self, window_size: usize, window_start_sample: usize) {
+        // Acquire consumer lock.
         let sample_cons_lock = self.dft_src.sample_cons();
         let mut sample_cons = sample_cons_lock.lock().unwrap();
 
-        println!("window_size: {}, window_start: {}, cons_len: {}, cons_cap: {}", window_size, window_start_sample, sample_cons.len(), sample_cons.capacity());
+        println!(
+            "window_size: {}, window_start: {}, cons_len: {}, cons_cap: {}",
+            window_size,
+            window_start_sample,
+            sample_cons.len(),
+            sample_cons.capacity()
+        );
         // Window has moved past these samples. Discard them.
         sample_cons.discard(window_start_sample);
 
-        assert!(window_size < sample_cons.len());
+        if window_size > sample_cons.len() {
+            return;
+        }
 
         // Performs dft.
         let mut dft_clone = self.sliding_dft.borrow().clone();
@@ -111,17 +134,7 @@ impl<T: SlidingDftSrc> SlidingDft<T> {
         });
     }
 
-    /// Returns the dft of the singal.
-    pub fn dft(&self) -> &Rc<RefCell<Vec<Complex<f32>>>> {
-        &self.sliding_dft
-    }
-
-    pub fn sample_rate(&self) -> u32 {
-        self.dft_src.sample_rate()
-    }
-
     fn latency(&self) -> Duration {
         Duration::new(((self.sliding_dft.borrow().len() - 1) * 2) as u64, 0) / self.sample_rate()
     }
 }
-
