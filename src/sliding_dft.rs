@@ -1,26 +1,29 @@
 use realfft::RealFftPlanner;
+use ringbuf::Consumer;
 use rustfft::num_complex::Complex;
-use rustfft::num_traits::Zero;
-use ringbuf::{Consumer, Producer, RingBuffer};
 use std::cell::RefCell;
-use std::f32::consts::PI;
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+pub struct LatencyInfo {
+    pub sample_at_instant: Option<(usize, Instant)>,
+    pub max_latency: Option<Duration>,
+}
+
 pub trait SlidingDftSrc {
     /// Fills the sample buffer and records the time that it received the samples.
-    fn init( &mut self, sample_buffer_size: usize);
+    fn init(&mut self, sample_buffer_size: usize);
     /// Returns the sample rate of the dft source. Must be made available before init.
     fn sample_rate(&self) -> u32;
     /// Returns the buffer consumer
-    /// only valid after call to init.
+    /// Must be valid after call to init.
     fn sample_cons(&self) -> &Arc<Mutex<Consumer<f32>>>;
+    /// Returns the max latency of the source (How long it takes for a callback).
+    fn latency_info(&self) -> &Arc<Mutex<LatencyInfo>>;
 }
 
 pub struct SlidingDft<T: SlidingDftSrc> {
-    prev_window_start: Option<Instant>,
-    time_left_over: Duration,
     fft_planner: Rc<RefCell<RealFftPlanner<f32>>>,
     sliding_dft: Rc<RefCell<Vec<Complex<f32>>>>,
     dft_src: T,
@@ -35,50 +38,66 @@ impl<T: SlidingDftSrc> SlidingDft<T> {
         dft_src.init(window_size * 2);
 
         SlidingDft {
-            prev_window_start: None,
-            time_left_over: Duration::ZERO,
             fft_planner: Rc::new(RefCell::new(RealFftPlanner::new())),
             sliding_dft: Rc::new(RefCell::new(vec![
                 Complex::<f32>::new(0.0, 0.0);
                 (window_size / 2) + 1
             ])),
-            dft_src: dft_src,
+            dft_src,
         }
     }
 
     /// Updates the value for the SDFT. Should be called in a fairly tight loop.
     /// Perhaps even in its own thread.
     pub fn update(&mut self) {
-        let now = Instant::now();
-        let time_elapsed = self.prev_window_start.map_or(Duration::ZERO, |instant| now - instant);
-        
+        let latency_info_ref = self.dft_src.latency_info();
+        let latency_info = latency_info_ref.lock().unwrap();
+        // Latency unknown. return
+        if latency_info.max_latency == None {
+            return;
+        }
+        // Unwrap latency data.
+        let src_latency = latency_info.max_latency.unwrap();
         let sliding_dft = self.sliding_dft.borrow();
-        
-        let sample_rate = self.dft_src.sample_rate();
+
+        // Spectrum is about half the window size because the input data is real.
         let window_size = (sliding_dft.len() - 1) * 2;
-       
-        let window_start = time_elapsed * sample_rate + self.time_left_over;
-        self.time_left_over = Duration::from_nanos(window_start.subsec_nanos().into());
-        
-        let window_start = window_start.as_secs() as usize;
 
-        let sample_cons_lock = self.dft_src.sample_cons();
-        let mut sample_cons = sample_cons_lock.lock().unwrap();
-        // Nothing yet to consume
-        
-        // Samples are too old here.
-        sample_cons.discard(window_start);
-      
-        println!("window_size: {}, window_start: {}, cons_len: {}, cons_cap: {}", window_size, window_start, sample_cons.len(), sample_cons.capacity());
+        // Sample at an instant hasn't been taken by callback.
+        if latency_info.sample_at_instant == None {
+            return;
+        }
+        let mut sample_at_instant = latency_info.sample_at_instant.unwrap();
 
-        if window_size > sample_cons.len() {
-            println!("returning!");
+        let window_end_instant = Instant::now() - src_latency;
+        let window_start_instant = window_end_instant - self.latency();
+
+
+        // Latency is longer than expected. Return and try again later.
+        if window_end_instant > sample_at_instant.1 {
             return;
         }
 
-        self.prev_window_start = Some(now);
+        // Start sample is the number of samples behind the sample at sample_instant.
+        let window_start_sample = sample_at_instant.0
+            - ((sample_at_instant.1 - window_start_instant) * self.dft_src.sample_rate()).as_secs()
+                as usize;
 
-        // Performs sliding dft.
+        println!("sample_at_instant {:?}", sample_at_instant.0);
+
+        sample_at_instant.0 -= window_start_sample;
+
+        // Acquire consumer lock.
+        let sample_cons_lock = self.dft_src.sample_cons();
+        let mut sample_cons = sample_cons_lock.lock().unwrap();
+
+        println!("window_size: {}, window_start: {}, cons_len: {}, cons_cap: {}", window_size, window_start_sample, sample_cons.len(), sample_cons.capacity());
+        // Window has moved past these samples. Discard them.
+        sample_cons.discard(window_start_sample);
+
+        assert!(window_size < sample_cons.len());
+
+        // Performs dft.
         let mut dft_clone = sliding_dft.clone();
         let fft_planner_clone = self.fft_planner.clone();
         sample_cons.access(|buf1, buf2| {
@@ -88,16 +107,15 @@ impl<T: SlidingDftSrc> SlidingDft<T> {
             let real_to_complex = fft_planner_clone.borrow_mut().plan_fft_forward(window_size);
             // make input and output vectors
             let mut indata = real_to_complex.make_input_vec();
-            
+
             indata[0..window_size].copy_from_slice(window);
 
             // Apply hanning window.
 
-            real_to_complex.process(&mut indata, &mut dft_clone[..]).unwrap();
-            println!("{}", dft_clone[10]);
-            assert!((indata.len() / 2) + 1 == dft_clone.len());
+            real_to_complex
+                .process(&mut indata, &mut dft_clone[..])
+                .unwrap();
         });
-
     }
 
     /// Returns the dft of the singal.
@@ -108,11 +126,9 @@ impl<T: SlidingDftSrc> SlidingDft<T> {
     pub fn sample_rate(&self) -> u32 {
         self.dft_src.sample_rate()
     }
-}
 
-pub fn reallocate_ring_buf<T>(consumer: &mut Consumer<T>, size: usize) -> (Producer<T>, Consumer<T>) {
-    let (mut prod, cons) = RingBuffer::new(size).split();
-    prod.move_from(consumer, None);
-    (prod, cons)
+    fn latency(&self) -> Duration {
+        Duration::new(((self.sliding_dft.borrow().len() - 1) * 2) as u64, 0) / self.sample_rate()
+    }
 }
 
