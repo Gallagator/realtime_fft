@@ -88,5 +88,3 @@ impl RealtimeFftSrc for InputStream {
         &self.inner.as_ref().unwrap().src_info.latency_info()
     }
 }
-
-
