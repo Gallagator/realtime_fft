@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 
 
 pub mod realtime_fft_src {
-    use ringbuf::Consumer;
+    use ringbuf::{RingBuffer, Producer, Consumer};
     use std::sync::{Arc, Mutex};
     use std::time::{Duration, Instant};
 
@@ -26,6 +26,63 @@ pub mod realtime_fft_src {
         fn sample_cons(&self) -> &Arc<Mutex<Consumer<f32>>>;
         /// Returns the max latency of the source (How long it takes for a callback).
         fn latency_info(&self) -> &Arc<Mutex<LatencyInfo>>;
+    }
+
+    #[derive(Clone)]
+    pub struct SrcInfo {
+        sample_prod: Arc<Mutex<Producer<f32>>>,
+        sample_cons: Arc<Mutex<Consumer<f32>>>,
+        latency_info: Arc<Mutex<LatencyInfo>>
+    }
+
+    impl SrcInfo {
+        pub fn new(sample_buffer_size: usize) -> Self {
+            let (sample_prod, sample_cons) = RingBuffer::new(sample_buffer_size).split();
+
+            let sample_cons = Arc::new(Mutex::new(sample_cons));
+            let sample_prod = Arc::new(Mutex::new(sample_prod));
+            let latency_info = Arc::new(Mutex::new(LatencyInfo {
+                sample_at_instant: None,
+                max_latency: None,
+            }));
+
+            SrcInfo {sample_prod, sample_cons, latency_info} 
+        }
+
+        pub fn push_callback_data(&mut self, data: &[f32], sample_buffer_size: usize) {
+            let mut sample_prod = self.sample_prod.lock().unwrap();
+
+            if data.len() > sample_prod.capacity() {
+                let mut old_cons = self.sample_cons.lock().unwrap();
+                let (new_prod, new_cons) =
+                    reallocate_ring_buf(&mut old_cons, data.len() * 2 + sample_buffer_size);
+                *old_cons = new_cons;
+                *sample_prod = new_prod;
+            }
+            sample_prod.push_slice(data);
+
+            let mut latency_info = self.latency_info.lock().unwrap();
+            let prod_len = sample_prod.len();
+            let now = Instant::now();
+            latency_info.max_latency = latency_info
+                .sample_at_instant
+                .map_or(None, |(_, instant)| Some(now - instant));
+            latency_info.sample_at_instant = Some((prod_len, now));
+        }
+
+        pub fn sample_cons(&self) -> &Arc<Mutex<Consumer<f32>>> {
+            &self.sample_cons 
+        }
+
+        pub fn latency_info(&self) -> &Arc<Mutex<LatencyInfo>> {
+            &self.latency_info     
+        }
+    }
+
+    fn reallocate_ring_buf<T>(consumer: &mut Consumer<T>, size: usize,) -> (Producer<T>, Consumer<T>) {
+        let (mut prod, cons) = RingBuffer::new(size).split();
+        prod.move_from(consumer, None);
+        (prod, cons)
     }
 }
 
