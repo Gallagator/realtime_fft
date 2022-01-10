@@ -1,41 +1,43 @@
 use realfft::RealFftPlanner;
-use ringbuf::Consumer;
 use rustfft::num_complex::Complex;
 use std::cell::RefCell;
 use std::ops::DerefMut;
 use std::rc::Rc;
-use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 
-mod realtime_fft_src {
+pub mod realtime_fft_src {
+    use ringbuf::Consumer;
+    use std::sync::{Arc, Mutex};
+    use std::time::{Duration, Instant};
 
+    pub struct LatencyInfo {
+        pub sample_at_instant: Option<(usize, Instant)>,
+        pub max_latency: Option<Duration>,
+    }
+    
+    pub trait RealtimeFftSrc {
+        /// Fills the sample buffer and records the time that it received the samples.
+        fn init(&mut self, sample_buffer_size: usize);
+        /// Returns the sample rate of the dft source. Must be made available before init.
+        fn sample_rate(&self) -> u32;
+        /// Returns the buffer consumer
+        /// Must be valid after call to init.
+        fn sample_cons(&self) -> &Arc<Mutex<Consumer<f32>>>;
+        /// Returns the max latency of the source (How long it takes for a callback).
+        fn latency_info(&self) -> &Arc<Mutex<LatencyInfo>>;
+    }
 }
 
-pub struct LatencyInfo {
-    pub sample_at_instant: Option<(usize, Instant)>,
-    pub max_latency: Option<Duration>,
-}
 
-pub trait SlidingDftSrc {
-    /// Fills the sample buffer and records the time that it received the samples.
-    fn init(&mut self, sample_buffer_size: usize);
-    /// Returns the sample rate of the dft source. Must be made available before init.
-    fn sample_rate(&self) -> u32;
-    /// Returns the buffer consumer
-    /// Must be valid after call to init.
-    fn sample_cons(&self) -> &Arc<Mutex<Consumer<f32>>>;
-    /// Returns the max latency of the source (How long it takes for a callback).
-    fn latency_info(&self) -> &Arc<Mutex<LatencyInfo>>;
-}
 
-pub struct SlidingDft<T: SlidingDftSrc> {
+pub struct SlidingDft<T: realtime_fft_src::RealtimeFftSrc> {
     fft_planner: Rc<RefCell<RealFftPlanner<f32>>>,
     sliding_dft: Rc<RefCell<Vec<Complex<f32>>>>,
     dft_src: T,
 }
 
-impl<T: SlidingDftSrc> SlidingDft<T> {
+impl<T: realtime_fft_src::RealtimeFftSrc> SlidingDft<T> {
     pub fn new(mut dft_src: T, window_duration: Duration) -> SlidingDft<T> {
         let sample_rate = dft_src.sample_rate();
 
@@ -62,7 +64,7 @@ impl<T: SlidingDftSrc> SlidingDft<T> {
         // If Latency and sample at instant are present, calculate starting
         // sample for dft. Otherwise return.
         let window_start_sample = match latency_info_ref.lock().unwrap().deref_mut() {
-            LatencyInfo {
+            realtime_fft_src::LatencyInfo {
                 sample_at_instant: Some((sample_at, sample_instant)),
                 max_latency: Some(src_latency),
             } => {

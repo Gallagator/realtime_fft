@@ -1,4 +1,4 @@
-use crate::realtime_fft::{LatencyInfo, SlidingDftSrc};
+use crate::realtime_fft::realtime_fft_src::{LatencyInfo, RealtimeFftSrc};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::SampleRate;
 use ringbuf::{Consumer, Producer, RingBuffer};
@@ -44,7 +44,7 @@ impl InputStream {
     }
 }
 
-impl SlidingDftSrc for InputStream {
+impl RealtimeFftSrc for InputStream {
     fn init(&mut self, sample_buffer_size: usize) {
         let (sample_prod, sample_cons) = RingBuffer::new(sample_buffer_size).split();
 
