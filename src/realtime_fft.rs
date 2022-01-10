@@ -7,6 +7,11 @@ use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+
+mod realtime_fft_src {
+
+}
+
 pub struct LatencyInfo {
     pub sample_at_instant: Option<(usize, Instant)>,
     pub max_latency: Option<Duration>,

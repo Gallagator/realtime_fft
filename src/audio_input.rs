@@ -1,4 +1,4 @@
-use crate::realtime_dft::sliding_dft::{LatencyInfo, SlidingDftSrc};
+use crate::realtime_fft::{LatencyInfo, SlidingDftSrc};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::SampleRate;
 use ringbuf::{Consumer, Producer, RingBuffer};
