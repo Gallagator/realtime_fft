@@ -52,12 +52,19 @@ pub mod realtime_fft_src {
         pub fn push_callback_data(&mut self, data: &[f32], sample_buffer_size: usize) {
             let mut sample_prod = self.sample_prod.lock().unwrap();
 
-            if data.len() > sample_prod.capacity() {
+            if data.len() + sample_buffer_size > sample_prod.capacity() {
                 let mut old_cons = self.sample_cons.lock().unwrap();
                 let (new_prod, new_cons) =
-                    reallocate_ring_buf(&mut old_cons, data.len() * 2 + sample_buffer_size);
+                    reallocate_ring_buf(&mut old_cons, data.len() + sample_buffer_size);
                 *old_cons = new_cons;
                 *sample_prod = new_prod;
+            }
+            // Unable to push entire slice. Drop earlier samples.
+            let sample_prod_remaining = sample_prod.remaining();
+            if data.len() > sample_prod_remaining {
+                let mut sample_cons = self.sample_cons.lock().unwrap();
+                sample_cons.discard(data.len() - sample_prod_remaining);
+
             }
             sample_prod.push_slice(data);
 
@@ -86,12 +93,11 @@ pub mod realtime_fft_src {
     }
 }
 
-
-
 pub struct SlidingDft<T: realtime_fft_src::RealtimeFftSrc> {
     fft_planner: Rc<RefCell<RealFftPlanner<f32>>>,
     sliding_dft: Rc<RefCell<Vec<Complex<f32>>>>,
     dft_src: T,
+    latency: Duration
 }
 
 impl<T: realtime_fft_src::RealtimeFftSrc> SlidingDft<T> {
@@ -109,6 +115,7 @@ impl<T: realtime_fft_src::RealtimeFftSrc> SlidingDft<T> {
                 (window_size / 2) + 1
             ])),
             dft_src,
+            latency: window_duration
         }
     }
 
@@ -128,8 +135,9 @@ impl<T: realtime_fft_src::RealtimeFftSrc> SlidingDft<T> {
                 // Spectrum is about half the window size because the input data is real.
 
                 let window_end_instant = Instant::now() - *src_latency;
-                let window_start_instant = window_end_instant - self.latency();
+                let window_start_instant = window_end_instant - self.latency;
 
+                println!("Sample_at: {}", sample_at);
                 // Latency is longer than expected.)uu Return and try again later.
                 if window_end_instant > *sample_instant {
                     return;
@@ -196,9 +204,5 @@ impl<T: realtime_fft_src::RealtimeFftSrc> SlidingDft<T> {
                 .process(&mut indata, &mut dft_clone[..])
                 .unwrap();
         });
-    }
-
-    fn latency(&self) -> Duration {
-        Duration::new(((self.sliding_dft.borrow().len() - 1) * 2) as u64, 0) / self.sample_rate()
     }
 }

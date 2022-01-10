@@ -9,7 +9,7 @@ fn main() {
     let stream = audio_input::InputStream::new();
     let mut dft = realtime_fft::SlidingDft::new(stream, Duration::from_secs_f64(0.02));
     let sleep_time = Duration::new(1, 0) / dft.sample_rate();
-    for _ in 0..1000 {
+    loop {
 //        let now = Instant::now();
         dft.update();
         std::thread::sleep(sleep_time)

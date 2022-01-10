@@ -1,9 +1,8 @@
 use crate::realtime_fft::realtime_fft_src::{LatencyInfo, RealtimeFftSrc, SrcInfo};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::SampleRate;
-use ringbuf::{Consumer, Producer, RingBuffer};
+use ringbuf::Consumer;
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
 
 struct InputStreamInner {
     stream: cpal::Stream,
