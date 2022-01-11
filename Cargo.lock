@@ -530,23 +530,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9ea835d29036a4087793836fa931b08837ad5e957da9e23886b29586fb9b6650"
 
 [[package]]
-name = "fft"
-version = "0.1.0"
-dependencies = [
- "approx",
- "cpal",
- "num-complex",
- "rand",
- "realfft",
- "ringbuf",
- "rustfft",
- "vulkano",
- "vulkano-shaders",
- "vulkano-win",
- "winit",
-]
-
-[[package]]
 name = "fnv"
 version = "1.0.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1311,6 +1294,23 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d7695c87f31dc3644760f23fb59a3fed47659703abf76cf2d111f03b9e712342"
 dependencies = [
  "rustfft",
+]
+
+[[package]]
+name = "realtime_fft"
+version = "0.1.0"
+dependencies = [
+ "approx",
+ "cpal",
+ "num-complex",
+ "rand",
+ "realfft",
+ "ringbuf",
+ "rustfft",
+ "vulkano",
+ "vulkano-shaders",
+ "vulkano-win",
+ "winit",
 ]
 
 [[package]]
