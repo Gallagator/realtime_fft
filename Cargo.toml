@@ -17,8 +17,8 @@ approx = "0.5.0"
 cpal = "0.13.4"
 
 # Vulkan graphics libraries
-vulkano = "0.20"
-vulkano-shaders = "0.20"
+vulkano = "0.27.1"
+vulkano-shaders = "0.27.1"
 # Windowing libraries
-winit = "0.24"
-vulkano-win = "0.20"
+winit = "0.25.0"
+vulkano-win = "0.27.1"
